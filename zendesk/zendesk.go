@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-
+	b64 "encoding/base64"
 	"github.com/google/go-querystring/query"
 )
 
@@ -23,6 +23,7 @@ var defaultHeaders = map[string]string{
 }
 
 var subdomainRegexp = regexp.MustCompile("^[a-z0-9][a-z0-9-]+[a-z0-9]$")
+var subdomain string
 
 // Client of Zendesk API
 type Client struct {
@@ -50,12 +51,13 @@ func (z *Client) SetHeader(key string, value string) {
 
 // SetSubdomain saves subdomain in client. It will be used
 // when call API
-func (z *Client) SetSubdomain(subdomain string) error {
-	if !subdomainRegexp.MatchString(subdomain) {
-		return fmt.Errorf("%s is invalid subdomain", subdomain)
+func (z *Client) SetSubdomain(s string) error {
+	if !subdomainRegexp.MatchString(s) {
+		return fmt.Errorf("%s is invalid subdomain", s)
 	}
 
-	baseURLString := fmt.Sprintf(baseURLFormat, subdomain)
+	subdomain = s
+	baseURLString := fmt.Sprintf(baseURLFormat, s)
 	baseURL, err := url.Parse(baseURLString)
 	if err != nil {
 		return err
@@ -83,15 +85,42 @@ func (z *Client) SetCredential(cred Credential) {
 	z.credential = cred
 }
 
+// The Jira Link endpiont requires a different base URL than all other
+// endpionts used in this library, so we need a function to set the correct
+// url if we are hitting that endpoint.
+func determineURL(baseURL string, path string) (url string) {
+	if strings.Contains(path, "jira/links/") {
+		return "https://" + subdomain + ".zendesk.com/api/services" + path
+	}
+	if strings.Contains(path, "jira/links") {
+		return "https://" + subdomain + ".zendesk.com/api/v2" + path
+	}
+	return baseURL+path
+}
+
+// The Jira Links API requires a base-64 encoded auth header in the format 
+// [email]/token:[api_token]. If this header is not set, you will get a 403 
+// error response.
+func (z *Client) getAuthHeaderForJira() (auth_header string) {
+	email := z.credential.Email()
+	token := z.credential.Secret()
+	header := email + ":" + token
+	encoded_header := b64.StdEncoding.EncodeToString([]byte(header))
+	return "Basic " + encoded_header
+}
+
 // get get JSON data from API and returns its body as []bytes
 func (z *Client) get(ctx context.Context, path string) ([]byte, error) {
-	req, err := http.NewRequest(http.MethodGet, z.baseURL.String()+path, nil)
+	req, err := http.NewRequest(http.MethodGet, determineURL(z.baseURL.String(), path), nil)
 	if err != nil {
 		return nil, err
 	}
-
 	req = z.prepareRequest(ctx, req)
-
+	
+	// Set the correct auth header if we are hitting a Jira endpoint. 
+	if strings.Contains(path, "jira") {
+		req.Header.Set("Authorization", z.getAuthHeaderForJira())	
+	}
 	resp, err := z.httpClient.Do(req)
 	if err != nil {
 		return nil, err
